@@ -15,7 +15,6 @@ from aiohttp import (
 from eth_typing import (
     URI,
 )
-import lru
 import requests
 
 from web3._utils.caching import (
@@ -47,6 +46,9 @@ class SessionCache:
     def get_cache_entry(self, key: str) -> Any:
         return self._data[key]
 
+    def clear(self) -> None:
+        self._data.clear()
+
     def __contains__(self, item: str) -> bool:
         return item in self._data
 
@@ -58,41 +60,50 @@ def get_default_http_endpoint() -> URI:
     return URI(os.environ.get('WEB3_HTTP_PROVIDER_URI', 'http://localhost:8545'))
 
 
-def cache_session(endpoint_uri: URI, session: requests.Session) -> None:
+_session_cache = SessionCache(size=8)
+_async_session_cache = SessionCache(size=8)
+
+_async_session_cache_lock = threading.Lock()
+_session_cache_lock = threading.Lock()
+
+
+def _get_session(endpoint_uri: URI, session: requests.Session = None) -> requests.Session:
     cache_key = generate_cache_key(endpoint_uri)
-    _session_cache[cache_key] = session
+    with _session_cache_lock:
+        evicted_items = None
+        if session is not None:
+            evicted_items = _session_cache.cache(cache_key, session)
+        elif cache_key not in _session_cache:
+            evicted_items = _session_cache.cache(cache_key, requests.Session())
+
+        if evicted_items is not None:
+            for key, session in evicted_items.items():
+                session.close()
+        return _session_cache.get_cache_entry(cache_key)
 
 
-async def cache_async_session(endpoint_uri: URI, session: ClientSession) -> None:
+async def _get_async_session(endpoint_uri: URI, session: ClientSession = None) -> ClientSession:
     cache_key = generate_cache_key(endpoint_uri)
     with _async_session_cache_lock:
-        evicted_items = _async_session_cache.cache(cache_key, session)
+        evicted_items = None
+        if session is not None:
+            evicted_items = _async_session_cache.cache(cache_key, session)
+        elif cache_key not in _async_session_cache:
+            evicted_items = _async_session_cache.cache(cache_key,
+                                                       ClientSession(raise_for_status=True))
+
         if evicted_items is not None:
             for key, session in evicted_items.items():
                 await session.close()
+        return _async_session_cache.get_cache_entry(cache_key)
 
 
-def _remove_session(key: str, session: requests.Session) -> None:
-    session.close()
+def cache_session(endpoint_uri: URI, session: requests.Session) -> None:
+    _get_session(endpoint_uri, session)
 
 
-_session_cache = lru.LRU(8, callback=_remove_session)
-_async_session_cache_lock = threading.Lock()
-_async_session_cache = SessionCache(size=8)
-
-
-def _get_session(endpoint_uri: URI) -> requests.Session:
-    cache_key = generate_cache_key(endpoint_uri)
-    if cache_key not in _session_cache:
-        _session_cache[cache_key] = requests.Session()
-    return _session_cache[cache_key]
-
-
-async def _get_async_session(endpoint_uri: URI) -> ClientSession:
-    cache_key = generate_cache_key(endpoint_uri)
-    if cache_key not in _async_session_cache:
-        await cache_async_session(endpoint_uri, ClientSession(raise_for_status=True))
-    return _async_session_cache.get_cache_entry(cache_key)
+async def cache_async_session(endpoint_uri: URI, session: ClientSession) -> None:
+    await _get_async_session(endpoint_uri, session)
 
 
 def make_post_request(endpoint_uri: URI, data: bytes, *args: Any, **kwargs: Any) -> bytes:
