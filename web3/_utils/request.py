@@ -65,11 +65,12 @@ def cache_session(endpoint_uri: URI, session: requests.Session) -> None:
 
 async def cache_async_session(endpoint_uri: URI, session: ClientSession) -> None:
     cache_key = generate_cache_key(endpoint_uri)
+    evicted_items: Dict[str, Any] = None
     with _async_session_cache_lock:
         evicted_items = _async_session_cache.cache(cache_key, session)
-        if evicted_items is not None:
-            for key, session in evicted_items.items():
-                await session.close()
+    if evicted_items is not None:
+        for key, session in evicted_items.items():
+            await session.close()
 
 
 def _remove_session(key: str, session: requests.Session) -> None:
